@@ -4,13 +4,14 @@ import (
 	"context"
 	"embed"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/go-logr/logr"
 	configv1 "github.com/openshift/api/config/v1"
-	"github.com/openshift/controller-runtime-common/pkg/tls"
+	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
 	"github.com/openshift/library-go/pkg/controller/controllercmd"
 	"github.com/openshift/library-go/pkg/crypto"
 	"github.com/spf13/cobra"
@@ -94,6 +95,11 @@ type override struct {
 func NewManagerCommand(componentName string, log logr.Logger) *cobra.Command {
 	var withOverride bool
 	runController := func(ctx context.Context, controllerContext *controllercmd.ControllerContext) error {
+		// Use a child context so the SecurityProfileWatcher can trigger a graceful
+		// restart by cancelling managerCtx when the cluster TLS profile changes.
+		managerCtx, cancelManager := context.WithCancel(ctx)
+		defer cancelManager()
+
 		mgr, err := addonmanager.New(controllerContext.KubeConfig)
 		if err != nil {
 			return err
@@ -131,7 +137,7 @@ func NewManagerCommand(componentName string, log logr.Logger) *cobra.Command {
 
 		// Start the addon framework manager in a goroutine
 		go func() {
-			if err := mgr.Start(ctx); err != nil {
+			if err := mgr.Start(managerCtx); err != nil {
 				log.Error(err, "failed to start addon framework manager")
 				os.Exit(1)
 			}
@@ -170,11 +176,47 @@ func NewManagerCommand(componentName string, log logr.Logger) *cobra.Command {
 			return err
 		}
 
-		// Start the custom controller manager in a goroutine
+		// Fetch the cluster TLS profile once at startup.
+		// Falls back to the Intermediate profile (TLS 1.2+) when the APIServer
+		// resource is absent (e.g. kind clusters used in e2e tests).
+		profileSpec, err := tlspkg.FetchAPIServerTLSProfile(managerCtx, hubClient)
+		if err != nil {
+			log.Error(err, "failed to fetch APIServer TLS profile, using Intermediate defaults")
+			profileSpec, _ = tlspkg.GetTLSProfileSpec(nil)
+		}
+
+		// Register the SecurityProfileWatcher on the custom manager.
+		// When the cluster TLS profile changes, it calls cancelManager() which
+		// triggers a graceful shutdown — the pod restarts and picks up the new profile.
+		watcher := &tlspkg.SecurityProfileWatcher{
+			Client:                hubClient,
+			InitialTLSProfileSpec: profileSpec,
+			OnProfileChange: func(_ context.Context, old, new configv1.TLSProfileSpec) {
+				log.Info("cluster TLS profile changed, initiating graceful restart",
+					"old", old.MinTLSVersion, "new", new.MinTLSVersion)
+				cancelManager()
+			},
+		}
+		if err := watcher.SetupWithManager(customMgr); err != nil {
+			log.Error(err, "failed to setup TLS security profile watcher")
+			return err
+		}
+
+		// Start the custom controller manager in a goroutine.
+		// If it fails to start (e.g. informer cache sync timeout), cancel the
+		// manager context so the pod restarts and gets a clean retry.
 		go func() {
 			log.Info("starting custom controller manager")
-			if err := customMgr.Start(ctx); err != nil {
+			if err := customMgr.Start(managerCtx); err != nil {
 				log.Error(err, "failed to start custom controller manager")
+				cancelManager()
+			}
+		}()
+
+		// Start the HCP proxy with the fetched TLS profile.
+		go func() {
+			if err := StartHCPProxy(managerCtx, profileSpec, controllerContext.KubeConfig, hubClient, log.WithName("hcp-proxy")); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error(err, "HCP proxy stopped unexpectedly")
 			}
 		}()
 
@@ -185,7 +227,7 @@ func NewManagerCommand(componentName string, log logr.Logger) *cobra.Command {
 			log.Error(err, "failed to enable hypershift CLI download")
 		}
 
-		<-ctx.Done()
+		<-managerCtx.Done()
 
 		return nil
 	}
@@ -407,10 +449,10 @@ func (o *override) getValueForAgentTemplate(cluster *clusterv1.ManagedCluster,
 // for kube-rbac-proxy flags. Falls back to Intermediate profile on error.
 func (o *override) getTLSProfileValues() (string, string) {
 	ctx := context.Background()
-	profileSpec, err := tls.FetchAPIServerTLSProfile(ctx, o.Client)
+	profileSpec, err := tlspkg.FetchAPIServerTLSProfile(ctx, o.Client)
 	if err != nil {
 		o.log.Info("unable to read APIServer TLS profile, using Intermediate defaults", "error", err)
-		profileSpec, _ = tls.GetTLSProfileSpec(nil)
+		profileSpec, _ = tlspkg.GetTLSProfileSpec(nil)
 	}
 
 	minVersion := string(profileSpec.MinTLSVersion)

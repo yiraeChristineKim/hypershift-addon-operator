@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hypershift-addon-hcp-proxy
+rules:
+- apiGroups: ["clusterview.open-cluster-management.io"]
+  resources: ["userpermissions"]
+  verbs: ["get"]  # GET "managedcluster:admin" under caller impersonation
+- apiGroups: ["cluster.open-cluster-management.io"]
+  resources: ["managedclusters"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["config.openshift.io"]
+  resources: ["apiservers"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hypershift-addon-hcp-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hypershift-addon-hcp-proxy
+subjects:
+- kind: ServiceAccount
+  name: hypershift-addon-manager-sa
+  namespace: multicluster-engine

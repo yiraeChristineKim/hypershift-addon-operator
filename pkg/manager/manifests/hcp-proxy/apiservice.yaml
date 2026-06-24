@@ -1,0 +1,18 @@
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.hcp.ocm.io
+  annotations:
+    # service-ca-operator (OpenShift) injects the cluster CA bundle into spec.caBundle.
+    # No-op on non-OpenShift; insecureSkipTLSVerify keeps the APIService functional there.
+    service.beta.openshift.io/inject-cabundle: "true"
+spec:
+  group: hcp.ocm.io
+  groupPriorityMinimum: 2000
+  insecureSkipTLSVerify: true
+  service:
+    name: hypershift-addon-hcp-proxy
+    namespace: multicluster-engine
+    port: 443
+  version: v1alpha1
+  versionPriority: 10

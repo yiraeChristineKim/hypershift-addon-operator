@@ -1,0 +1,52 @@
+name: E2E – HCP Proxy
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "pkg/manager/hcp_proxy.go"
+      - "pkg/manager/manifests/hcp-proxy/**"
+      - "test/e2e/hcp_proxy_test.go"
+      - ".github/workflows/e2e-hcp-proxy.yaml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "pkg/manager/hcp_proxy.go"
+      - "pkg/manager/manifests/hcp-proxy/**"
+      - "test/e2e/hcp_proxy_test.go"
+      - ".github/workflows/e2e-hcp-proxy.yaml"
+  workflow_dispatch: {}
+
+env:
+  GO_VERSION: "1.26"
+  KIND_CLUSTER_NAME: hcp-proxy-e2e
+
+jobs:
+  e2e-hcp-proxy:
+    name: HCP Proxy E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up cluster and deploy addon manager
+        run: make e2e-hcp-proxy-setup KIND_CLUSTER_NAME=${{ env.KIND_CLUSTER_NAME }}
+
+      - name: Run HCP Proxy e2e tests
+        env:
+          KUBECONFIG: ${{ env.HOME }}/.kube/config
+        run: make test-e2e-hcp-proxy KIND_CLUSTER_NAME=${{ env.KIND_CLUSTER_NAME }}
+
+      - name: Dump addon manager logs on failure
+        if: failure()
+        run: kubectl logs -n multicluster-engine -l app=hypershift-addon-manager --tail=200 || true
+
+      - name: Delete kind cluster
+        if: always()
+        run: make kind-delete KIND_CLUSTER_NAME=${{ env.KIND_CLUSTER_NAME }}

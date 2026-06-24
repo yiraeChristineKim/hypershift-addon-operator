@@ -1,0 +1,81 @@
+# Minimal hub addon-manager deployment for e2e testing.
+# The image is overridden by the workflow via `kubectl set image` after apply.
+# NOT for production use — uses cluster-admin for simplicity.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hypershift-addon-manager-sa
+  namespace: multicluster-engine
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hypershift-addon-manager-sa-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: hypershift-addon-manager-sa
+    namespace: multicluster-engine
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hypershift-addon-manager
+  namespace: multicluster-engine
+  labels:
+    app: hypershift-addon-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hypershift-addon-manager
+  template:
+    metadata:
+      labels:
+        app: hypershift-addon-manager
+    spec:
+      serviceAccountName: hypershift-addon-manager-sa
+      volumes:
+        - name: hcp-proxy-tls
+          secret:
+            secretName: hypershift-addon-hcp-proxy-tls
+            optional: true  # absent on kind; proxy falls back to self-signed cert
+      containers:
+        - name: hypershift-addon-manager
+          # Placeholder — overridden by `kubectl set image` in the workflow/Makefile
+          image: quay.io/stolostron/hypershift-addon-operator:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - "./hypershift-addon"
+            - "manager"
+            - "--namespace=multicluster-engine"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Set by the workflow to enable proxy manifest application
+            - name: HYPERSHIFT_ADDON_IMAGE_NAME
+              value: quay.io/stolostron/hypershift-addon-operator:latest
+          volumeMounts:
+            - mountPath: /etc/hcp-proxy/tls
+              name: hcp-proxy-tls
+              readOnly: true
+          ports:
+            - name: hcp-proxy
+              containerPort: 8443
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true

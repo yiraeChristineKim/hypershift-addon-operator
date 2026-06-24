@@ -140,10 +140,114 @@ build-e2e:
 test-e2e: build-e2e deploy-ocm deploy-addon-manager
 #	./e2e.test -test.v -ginkgo.v -ginkgo.junit-report $(JUNIT_REPORT_FILE)
 
+##@ HCP Proxy E2E (local)
+
+# ---------------------------------------------------------------------------
+# Variables – override on the command line as needed:
+#   make e2e-hcp-proxy-full KIND_CLUSTER_NAME=my-cluster E2E_IMG=my-img:tag
+# ---------------------------------------------------------------------------
+KIND_VERSION         ?= v0.23.0
+KIND_CLUSTER_NAME    ?= hcp-proxy-e2e
+MANAGED_CLUSTER_NAME ?= local-cluster
+# Image tag used inside the kind cluster (no registry push required)
+E2E_IMG ?= kind-local/hypershift-addon-operator:$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+KIND     ?= $(shell which kind 2>/dev/null || echo $(GOBIN)/kind)
+
+.PHONY: ensure-kind
+ensure-kind: ## Install kind $(KIND_VERSION) to $(GOBIN) if not already present.
+	@if ! command -v kind >/dev/null 2>&1 && [ ! -f "$(GOBIN)/kind" ]; then \
+	  OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	  ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'); \
+	  echo "Installing kind $(KIND_VERSION) for $$OS/$$ARCH into $(GOBIN)..."; \
+	  curl -sSLo "$(GOBIN)/kind" \
+	    "https://kind.sigs.k8s.io/dl/$(KIND_VERSION)/kind-$$OS-$$ARCH"; \
+	  chmod +x "$(GOBIN)/kind"; \
+	fi
+	@$(KIND) version
+
+.PHONY: kind-create
+kind-create: ensure-kind ## Create the $(KIND_CLUSTER_NAME) kind cluster.
+	$(KIND) create cluster --name "$(KIND_CLUSTER_NAME)" --wait 120s
+	$(KUBECTL) cluster-info --context "kind-$(KIND_CLUSTER_NAME)"
+
+.PHONY: kind-delete
+kind-delete: ## Delete the $(KIND_CLUSTER_NAME) kind cluster.
+	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)" || true
+
+.PHONY: kind-load-e2e
+kind-load-e2e: ## Load E2E_IMG into the kind cluster.
+	$(KIND) load docker-image "$(E2E_IMG)" --name "$(KIND_CLUSTER_NAME)"
+
+.PHONY: wait-hcp-proxy-service
+wait-hcp-proxy-service: ## Wait until the HCP proxy Service has a cluster IP.
+	@echo "Waiting for HCP proxy Service (hypershift-addon-hcp-proxy)..."; \
+	for i in $$(seq 1 30); do \
+	  $(KUBECTL) get service -n multicluster-engine hypershift-addon-hcp-proxy \
+	    -o jsonpath='{.spec.clusterIP}' 2>/dev/null | grep -q '[0-9]' \
+	    && echo "Service ready." && exit 0; \
+	  echo "  waiting ($$i/30)..."; sleep 5; \
+	done; \
+	echo "ERROR: HCP proxy Service never became available"; exit 1
+
+.PHONY: wait-hcp-proxy-apiservice
+wait-hcp-proxy-apiservice: ## Wait until APIService v1alpha1.hcp.ocm.io is registered.
+	@echo "Waiting for APIService v1alpha1.hcp.ocm.io..."; \
+	for i in $$(seq 1 30); do \
+	  $(KUBECTL) get apiservice v1alpha1.hcp.ocm.io 2>/dev/null && exit 0; \
+	  echo "  waiting ($$i/30)..."; sleep 5; \
+	done; \
+	echo "ERROR: APIService v1alpha1.hcp.ocm.io never registered"; exit 1
+
+.PHONY: e2e-hcp-proxy-setup
+e2e-hcp-proxy-setup: kind-create deploy-ocm ## Spin up kind + OCM, build & load image, deploy addon manager.
+	docker build -t "$(E2E_IMG)" .
+	$(MAKE) kind-load-e2e E2E_IMG="$(E2E_IMG)"
+	$(KUBECTL) create namespace multicluster-engine --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) apply -f test/e2e/addon-manager-deployment.yaml
+	$(KUBECTL) set image -n multicluster-engine deployment/hypershift-addon-manager \
+	  hypershift-addon-manager="$(E2E_IMG)"
+	$(KUBECTL) set env -n multicluster-engine deployment/hypershift-addon-manager \
+	  HYPERSHIFT_ADDON_IMAGE_NAME="$(E2E_IMG)"
+	$(KUBECTL) rollout status -n multicluster-engine deployment/hypershift-addon-manager --timeout=120s
+	$(MAKE) wait-hcp-proxy-service
+	$(MAKE) wait-hcp-proxy-apiservice
+
+.PHONY: e2e-hcp-proxy-full
+e2e-hcp-proxy-full: e2e-hcp-proxy-setup ## Full cycle: setup → test → cleanup. On failure, run make kind-delete.
+	$(MAKE) test-e2e-hcp-proxy MANAGED_CLUSTER_NAME="$(MANAGED_CLUSTER_NAME)"
+	$(MAKE) kind-delete
+
+.PHONY: e2e-hcp-proxy-cleanup
+e2e-hcp-proxy-cleanup: kind-delete ## Tear down the $(KIND_CLUSTER_NAME) kind cluster.
+
+# Run only the HCP Proxy e2e suite against an already-deployed addon manager.
+# Works on both Linux (direct pod IP) and macOS (auto port-forward via kubectl).
+HCP_PROXY_PORT ?= 18443
+
+.PHONY: test-e2e-hcp-proxy
+test-e2e-hcp-proxy:
+ifeq ($(shell uname -s),Darwin)
+	@echo "macOS detected: starting kubectl port-forward on localhost:$(HCP_PROXY_PORT)..."
+	@POD=$$($(KUBECTL) get pods -n multicluster-engine -l app=hypershift-addon-manager \
+	        -o jsonpath='{.items[0].metadata.name}'); \
+	$(KUBECTL) port-forward -n multicluster-engine "pod/$$POD" \
+	        "$(HCP_PROXY_PORT):8443" & PF_PID=$$!; \
+	sleep 3; \
+	HCP_PROXY_HOST="localhost:$(HCP_PROXY_PORT)" \
+	  go test ./test/e2e -timeout 15m -ginkgo.v -ginkgo.focus "HCP Proxy"; \
+	RET=$$?; kill $$PF_PID 2>/dev/null || true; exit $$RET
+else
+	@echo "Linux detected: using pod IP directly..."
+	@POD_IP=$$($(KUBECTL) get pods -n multicluster-engine -l app=hypershift-addon-manager \
+	           -o jsonpath='{.items[0].status.podIP}'); \
+	HCP_PROXY_HOST="$$POD_IP" \
+	  go test ./test/e2e -timeout 15m -ginkgo.v -ginkgo.focus "HCP Proxy"
+endif
+
 .PHONY: deploy-addon-manager
 deploy-addon-manager:
 	$(KUBECTL) create namespace multicluster-engine --dry-run=client -o yaml | kubectl apply -f -
-	$(KUBECTL) apply -f example/addon-manager-deployment.yaml
+	$(KUBECTL) apply -f test/e2e/addon-manager-deployment.yaml
 	$(KUBECTL) set image -n multicluster-engine deployment/hypershift-addon-manager hypershift-addon-manager=$(IMG)
 	$(KUBECTL) set env -n multicluster-engine deployment/hypershift-addon-manager HYPERSHIFT_ADDON_IMAGE_NAME=$(IMG)
 	$(KUBECTL) rollout status -n multicluster-engine deployment/hypershift-addon-manager --timeout=60s

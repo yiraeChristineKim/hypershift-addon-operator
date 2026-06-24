@@ -1,0 +1,59 @@
+---
+description: Sync hub-side manifest changes to backplane-operator. Apply when editing pkg/manager/manifests/ files that affect hub-facing resources or hub manager RBAC.
+globs:
+  - pkg/manager/manifests/hcp-proxy/**
+  - pkg/manager/hcp_proxy.go
+  - pkg/manager/manager.go
+---
+
+# backplane-operator Sync Rule
+
+When adding or changing files under `pkg/manager/manifests/` that affect hub-side
+resources (not spoke agent templates under `manifests/templates/`), you MUST ALSO
+update the corresponding templates in `stolostron/backplane-operator`:
+
+  `pkg/templates/charts/toggle/hypershift/templates/`
+
+Local path (if checked out): `/Users/yiraekim/Documents/GitHub/origin/backplane-operator/pkg/templates/charts/toggle/hypershift/templates/`
+
+## Required syncs
+
+### New hub-facing ports
+→ Add `containerPort` entry to `hypershift-addon-manager-deployment.yaml`
+
+```yaml
+ports:
+- containerPort: 8443
+  name: hcp-proxy
+  protocol: TCP
+```
+
+### New hub manager RBAC rules
+→ Add rules to `hypershift-addon-manager_clusterrole.yaml`
+
+Currently added for the HCP proxy:
+```yaml
+- apiGroups: ["clusterview.open-cluster-management.io"]
+  resources: ["userpermissions"]
+  verbs: ["list"]
+- apiGroups: ["apiregistration.k8s.io"]
+  resources: ["apiservices"]
+  verbs: ["get", "list", "create", "update", "patch"]
+- apiGroups: ["config.openshift.io"]
+  resources: ["apiservers"]
+  verbs: ["get", "list", "watch"]
+```
+
+Note: `rbac.yaml` in `pkg/manager/manifests/hcp-proxy/` must stay in sync with the backplane-operator clusterrole. Both must include the `config.openshift.io/apiservers` rule so the SecurityProfileWatcher and `FetchAPIServerTLSProfile` can read the cluster TLS profile at startup and at runtime.
+
+### New hub ServiceAccount
+→ Add entry to `hypershift-addon-manager-serviceaccount.yaml`
+
+## Why
+The hub manager pod (Deployment, ClusterRole, ServiceAccount) is defined in
+`backplane-operator`, not in this repo. Resources applied at runtime by
+`applyHCPProxyManifests()` (Service, APIService, RBAC bindings) are fine here,
+but the Deployment containerPorts and ClusterRole rules must be pre-provisioned
+by MCE at install time.
+
+Upstream PR reference: https://github.com/stolostron/backplane-operator/tree/main/pkg/templates/charts/toggle/hypershift/templates
