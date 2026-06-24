@@ -1,0 +1,48 @@
+# Override ConfigMap for the hypershift-addon-operator agent image.
+#
+# The hypershift-addon-operator image is what runs as the spoke agent
+# (the binary we just built). This is separate from the HyperShift Operator
+# images that hypershift-override-images controls.
+#
+# Apply this ConfigMap to the managed (hosting) cluster's namespace on the hub.
+# Replace <MANAGED_CLUSTER_NAME> with the target hosting cluster name
+# (e.g. "local-cluster" for the hub-as-hosting scenario).
+#
+# After applying, the addon-framework will pick up the new image reference
+# on the next ManagedClusterAddon reconcile.
+#
+# Image built from branch: fix/hcp-kubeconfig-watcher-label-filter
+# Fix: HcpKubeconfigChangeWatcher no longer requeue-loops on deleted
+#      admin-kubeconfig secrets or HostedClusters.
+#
+# Built image: quay.io/yikim/hypershift-addon-operator:fix-hcp-kubeconfig-watcher
+# Digest:      sha256:b05359b4aab524654c8388be055fc766ddd5c6d3e9d749632ce89edd1639da1d
+# Arch:        linux/amd64
+
+---
+# Override the HyperShift Operator images installed on one hosting cluster.
+# This uses the documented hypershift-override-images mechanism (see docs/optional/upgrading_hypershift_operator.md).
+# Replace the sha256 values with actual images you want to override.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hypershift-override-images
+  # Namespace = the managed cluster name on the hub (e.g. local-cluster)
+  namespace: local-cluster
+data:
+  # Only populate the keys you want to override; omit the rest.
+  # hypershift-operator: quay.io/yikim/hypershift-addon-operator@sha256:b05359b4aab524654c8388be055fc766ddd5c6d3e9d749632ce89edd1639da1d
+
+---
+# Override the addon-agent image itself (the hypershift-addon-operator binary).
+# The addon-framework reads the image from the AddOnDeploymentConfig or from
+# the hub manager's rendered manifests. Patch the hub Deployment directly for
+# a quick dev/test cycle:
+#
+#   kubectl -n multicluster-engine set image deployment/hypershift-addon-manager \
+#     hypershift-addon-manager=quay.io/yikim/hypershift-addon-operator@sha256:b05359b4aab524654c8388be055fc766ddd5c6d3e9d749632ce89edd1639da1d
+#
+# Or patch the spoke agent Deployment (on the hosting cluster):
+#
+#   kubectl -n open-cluster-management-agent-addon set image deployment/hypershift-addon-agent \
+#     hypershift-addon-agent=quay.io/yikim/hypershift-addon-operator@sha256:b05359b4aab524654c8388be055fc766ddd5c6d3e9d749632ce89edd1639da1d
