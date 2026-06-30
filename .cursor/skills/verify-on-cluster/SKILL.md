@@ -60,7 +60,7 @@ Use `user-jira-mcp-server` → `add_comment` with:
 | Bug type | Safe simulation |
 |---|---|
 | Secret missing → addon skips step | `oc create secret ... --from-literal=...` then delete after |
-| Deployment args stripped by MCE | `oc patch deployment --type=json` to remove args; restore by restarting addon |
+| Deployment args stripped by MCE | `oc patch deployment --type=json` to remove args; restore by re-patching the original args back (a pod restart alone will NOT restore mutated spec — the addon manager will reconcile the original spec on its next loop, or you can force it with `oc rollout restart`) |
 | Feature flag / config state | Edit `hypershift-operator-install-flags` configmap; revert after |
 | Addon agent startup path | `oc rollout restart deployment/hypershift-addon-agent -n open-cluster-management-agent-addon` |
 
@@ -87,5 +87,9 @@ h3. Test Procedure
 h3. Result
 [Log excerpts or cluster state confirming the fix]
 
-*Fix verified. Marking ticket for closure.*
+*Fix verified.*
 ```
+
+> **CVE / Vulnerability tickets:** Do NOT mark for closure yourself. Leave status as **In Progress**,
+> reassign to `ocp-sustaining-admins`, and follow `cve-workflow.mdc`. Only Sustaining Engineering
+> closes Vulnerability tickets after verifying the backport.
